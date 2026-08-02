@@ -16,6 +16,9 @@ pub enum FilterType {
     DefaultIfNone(DefaultIfNoneFilter),
     DivisibleBy(DivisibleByFilter),
     Date(DateFilter),
+    Time(TimeFilter),
+    Timesince(TimesinceFilter),
+    Timeuntil(TimeuntilFilter),
     Escape(EscapeFilter),
     Escapejs(EscapejsFilter),
     External(ExternalFilter),
@@ -101,6 +104,42 @@ pub struct DateFilter {
 }
 
 impl DateFilter {
+    pub fn new(argument: Option<Argument>, at: At) -> Self {
+        Self { argument, at }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TimeFilter {
+    pub argument: Option<Argument>,
+    pub at: At,
+}
+
+impl TimeFilter {
+    pub fn new(argument: Option<Argument>, at: At) -> Self {
+        Self { argument, at }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TimesinceFilter {
+    pub argument: Option<Argument>,
+    pub at: At,
+}
+
+impl TimesinceFilter {
+    pub fn new(argument: Option<Argument>, at: At) -> Self {
+        Self { argument, at }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TimeuntilFilter {
+    pub argument: Option<Argument>,
+    pub at: At,
+}
+
+impl TimeuntilFilter {
     pub fn new(argument: Option<Argument>, at: At) -> Self {
         Self { argument, at }
     }

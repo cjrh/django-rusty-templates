@@ -12,8 +12,8 @@ use crate::filters::{
     AddFilter, AddSlashesFilter, CapfirstFilter, CenterFilter, CutFilter, DateFilter,
     DefaultFilter, DefaultIfNoneFilter, DivisibleByFilter, EscapeFilter, EscapejsFilter,
     ExternalFilter, FilterType, ForceEscapeFilter, LastFilter, LengthFilter, LowerFilter,
-    SafeFilter, SlugifyFilter, TitleFilter, UpperFilter, WordcountFilter, WordwrapFilter,
-    YesnoFilter,
+    SafeFilter, SlugifyFilter, TimeFilter, TimesinceFilter, TimeuntilFilter, TitleFilter,
+    UpperFilter, WordcountFilter, WordwrapFilter, YesnoFilter,
 };
 use crate::parse::Filter;
 use crate::render::common::gettext;
@@ -25,6 +25,10 @@ use unicode_normalization::UnicodeNormalization;
 static SAFEDATA: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 static GET_FORMAT: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static DATE_FORMAT: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static TEMPLATE_LOCALTIME: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static TIME_FILTER: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static TIMESINCE_FILTER: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static TIMEUNTIL_FILTER: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
 impl Resolve for Filter {
     fn resolve<'t, 'py>(
@@ -45,6 +49,9 @@ impl Resolve for Filter {
             FilterType::DefaultIfNone(filter) => filter.resolve(left, py, template, context),
             FilterType::DivisibleBy(filter) => filter.resolve(left, py, template, context),
             FilterType::Date(filter) => filter.resolve(left, py, template, context),
+            FilterType::Time(filter) => filter.resolve(left, py, template, context),
+            FilterType::Timesince(filter) => filter.resolve(left, py, template, context),
+            FilterType::Timeuntil(filter) => filter.resolve(left, py, template, context),
             FilterType::Escape(filter) => filter.resolve(left, py, template, context),
             FilterType::Escapejs(filter) => filter.resolve(left, py, template, context),
             FilterType::External(filter) => filter.resolve(left, py, template, context),
@@ -318,6 +325,113 @@ impl ResolveFilter for DateFilter {
                 ));
             }
         };
+
+        Ok(Some(Content::Py(formatted)))
+    }
+}
+
+impl ResolveFilter for TimeFilter {
+    fn resolve<'t, 'py>(
+        &self,
+        variable: Option<Content<'t, 'py>>,
+        py: Python<'py>,
+        template: TemplateString<'t>,
+        context: &mut Context,
+    ) -> ResolveResult<'t, 'py> {
+        let argument = match &self.argument {
+            Some(arg) => Some(
+                arg.resolve(py, template, context, ResolveFailures::Raise)?
+                    .expect("missing argument in context should already have raised")
+                    .to_py(py),
+            ),
+            None => None,
+        };
+
+        let Some(value) = variable else {
+            return Ok(Some("".as_content()));
+        };
+
+        let value = value.to_py(py);
+        let template_localtime =
+            TEMPLATE_LOCALTIME.import(py, "django.utils.timezone", "template_localtime")?;
+        let value = template_localtime
+            .call1((value,))
+            .map_err(|e| PyRenderError::PyErr(e.annotate(py, self.at, "here", template)))?;
+
+        let time_filter = TIME_FILTER.import(py, "django.template.defaultfilters", "time")?;
+        let formatted = match argument {
+            Some(arg) => time_filter.call1((value, arg)),
+            None => time_filter.call1((value,)),
+        }
+        .map_err(|e| PyRenderError::PyErr(e.annotate(py, self.at, "here", template)))?;
+
+        Ok(Some(Content::Py(formatted)))
+    }
+}
+
+impl ResolveFilter for TimesinceFilter {
+    fn resolve<'t, 'py>(
+        &self,
+        variable: Option<Content<'t, 'py>>,
+        py: Python<'py>,
+        template: TemplateString<'t>,
+        context: &mut Context,
+    ) -> ResolveResult<'t, 'py> {
+        let argument = match &self.argument {
+            Some(arg) => Some(
+                arg.resolve(py, template, context, ResolveFailures::Raise)?
+                    .expect("missing argument in context should already have raised")
+                    .to_py(py),
+            ),
+            None => None,
+        };
+
+        let Some(value) = variable else {
+            return Ok(Some("".as_content()));
+        };
+
+        let value = value.to_py(py);
+        let timesince_filter =
+            TIMESINCE_FILTER.import(py, "django.template.defaultfilters", "timesince_filter")?;
+        let formatted = match argument {
+            Some(arg) => timesince_filter.call1((value, arg)),
+            None => timesince_filter.call1((value,)),
+        }
+        .map_err(|e| PyRenderError::PyErr(e.annotate(py, self.at, "here", template)))?;
+
+        Ok(Some(Content::Py(formatted)))
+    }
+}
+
+impl ResolveFilter for TimeuntilFilter {
+    fn resolve<'t, 'py>(
+        &self,
+        variable: Option<Content<'t, 'py>>,
+        py: Python<'py>,
+        template: TemplateString<'t>,
+        context: &mut Context,
+    ) -> ResolveResult<'t, 'py> {
+        let argument = match &self.argument {
+            Some(arg) => Some(
+                arg.resolve(py, template, context, ResolveFailures::Raise)?
+                    .expect("missing argument in context should already have raised")
+                    .to_py(py),
+            ),
+            None => None,
+        };
+
+        let Some(value) = variable else {
+            return Ok(Some("".as_content()));
+        };
+
+        let value = value.to_py(py);
+        let timeuntil_filter =
+            TIMEUNTIL_FILTER.import(py, "django.template.defaultfilters", "timeuntil_filter")?;
+        let formatted = match argument {
+            Some(arg) => timeuntil_filter.call1((value, arg)),
+            None => timeuntil_filter.call1((value,)),
+        }
+        .map_err(|e| PyRenderError::PyErr(e.annotate(py, self.at, "here", template)))?;
 
         Ok(Some(Content::Py(formatted)))
     }

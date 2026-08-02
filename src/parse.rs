@@ -31,6 +31,9 @@ use crate::filters::LengthFilter;
 use crate::filters::LowerFilter;
 use crate::filters::SafeFilter;
 use crate::filters::SlugifyFilter;
+use crate::filters::TimeFilter;
+use crate::filters::TimesinceFilter;
+use crate::filters::TimeuntilFilter;
 use crate::filters::TitleFilter;
 use crate::filters::UpperFilter;
 use crate::filters::WordcountFilter;
@@ -196,6 +199,9 @@ impl Filter {
                 None => return Err(ParseError::MissingArgument { at: at.into() }),
             },
             "date" => FilterType::Date(DateFilter::new(right, at)),
+            "time" => FilterType::Time(TimeFilter::new(right, at)),
+            "timesince" => FilterType::Timesince(TimesinceFilter::new(right, at)),
+            "timeuntil" => FilterType::Timeuntil(TimeuntilFilter::new(right, at)),
             "escape" => match right {
                 Some(right) => return Err(unexpected_argument("escape", right)),
                 None => FilterType::Escape(EscapeFilter),
