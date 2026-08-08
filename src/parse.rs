@@ -26,6 +26,7 @@ use crate::filters::EscapejsFilter;
 use crate::filters::ExternalFilter;
 use crate::filters::FilterType;
 use crate::filters::ForceEscapeFilter;
+use crate::filters::JoinFilter;
 use crate::filters::LastFilter;
 use crate::filters::LengthFilter;
 use crate::filters::LowerFilter;
@@ -207,6 +208,10 @@ impl Filter {
             "force_escape" => match right {
                 Some(right) => return Err(unexpected_argument("force_escape", right)),
                 None => FilterType::ForceEscape(ForceEscapeFilter),
+            },
+            "join" => match right {
+                Some(right) => FilterType::Join(JoinFilter::new(right)),
+                None => return Err(ParseError::MissingArgument { at: at.into() }),
             },
             "last" => match right {
                 Some(right) => return Err(unexpected_argument("last", right)),

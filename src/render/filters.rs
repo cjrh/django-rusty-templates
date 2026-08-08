@@ -2,18 +2,19 @@ use std::borrow::Cow;
 
 use html_escape::encode_quoted_attribute_to_string;
 use num_traits::{ToPrimitive, Zero};
+use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 use pyo3::types::PyType;
-use pyo3::types::{PyDate, PyDateTime, PyTime};
+use pyo3::types::{PyDate, PyDateTime, PyList, PyString, PyTime};
 
 use crate::error::{AnnotatePyErr, PyRenderError, RenderError};
 use crate::filters::{
     AddFilter, AddSlashesFilter, CapfirstFilter, CenterFilter, CutFilter, DateFilter,
     DefaultFilter, DefaultIfNoneFilter, DivisibleByFilter, EscapeFilter, EscapejsFilter,
-    ExternalFilter, FilterType, ForceEscapeFilter, LastFilter, LengthFilter, LowerFilter,
-    SafeFilter, SlugifyFilter, TitleFilter, UpperFilter, WordcountFilter, WordwrapFilter,
-    YesnoFilter,
+    ExternalFilter, FilterType, ForceEscapeFilter, JoinFilter, LastFilter, LengthFilter,
+    LowerFilter, SafeFilter, SlugifyFilter, TitleFilter, UpperFilter, WordcountFilter,
+    WordwrapFilter, YesnoFilter,
 };
 use crate::parse::Filter;
 use crate::render::common::gettext;
@@ -23,6 +24,7 @@ use dtl_lexer::types::TemplateString;
 use unicode_normalization::UnicodeNormalization;
 
 static SAFEDATA: PyOnceLock<Py<PyType>> = PyOnceLock::new();
+static PROMISE: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 static GET_FORMAT: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static DATE_FORMAT: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
@@ -49,6 +51,7 @@ impl Resolve for Filter {
             FilterType::Escapejs(filter) => filter.resolve(left, py, template, context),
             FilterType::External(filter) => filter.resolve(left, py, template, context),
             FilterType::ForceEscape(filter) => filter.resolve(left, py, template, context),
+            FilterType::Join(filter) => filter.resolve(left, py, template, context),
             FilterType::Last(filter) => filter.resolve(left, py, template, context),
             FilterType::Lower(filter) => filter.resolve(left, py, template, context),
             FilterType::Length(filter) => filter.resolve(left, py, template, context),
@@ -420,6 +423,74 @@ impl ResolveFilter for EscapeFilter {
     }
 }
 
+enum ConditionalEscape<'t, 'py> {
+    Text(Cow<'t, str>),
+    Html(Bound<'py, PyAny>),
+}
+
+/// Escape content like Django's `conditional_escape` without creating a Python `SafeString`.
+fn conditional_escape<'t, 'py>(
+    content: Content<'t, 'py>,
+    py: Python<'py>,
+) -> PyResult<ConditionalEscape<'t, 'py>> {
+    match content {
+        Content::String(ContentString::HtmlSafe(content)) => Ok(ConditionalEscape::Text(content)),
+        Content::String(ContentString::String(content) | ContentString::HtmlUnsafe(content)) => {
+            let mut escaped = String::new();
+            encode_quoted_attribute_to_string(&content, &mut escaped);
+            Ok(ConditionalEscape::Text(Cow::Owned(escaped)))
+        }
+        content => conditional_escape_python(content.to_py(py)).map(|content| match content {
+            PythonConditionalEscape::Text(content) => ConditionalEscape::Text(Cow::Owned(content)),
+            PythonConditionalEscape::Html(content) => ConditionalEscape::Html(content),
+        }),
+    }
+}
+
+enum PythonConditionalEscape<'py> {
+    Text(String),
+    Html(Bound<'py, PyAny>),
+}
+
+enum JoinData<'py> {
+    Text(String),
+    Python(Bound<'py, PyAny>),
+}
+
+fn safe_content<'t, 'py>(content: Bound<'py, PyAny>) -> PyResult<Content<'t, 'py>> {
+    let py = content.py();
+    if content.hasattr(intern!(py, "__html__"))? {
+        return Ok(Content::Py(content));
+    }
+    Ok(Content::String(ContentString::HtmlSafe(Cow::Owned(
+        content.str()?.extract::<String>()?,
+    ))))
+}
+
+fn conditional_escape_python(value: Bound<'_, PyAny>) -> PyResult<PythonConditionalEscape<'_>> {
+    let py = value.py();
+    let value = if value.is_instance_of::<PyString>() {
+        value
+    } else {
+        let promise = PROMISE.import(py, "django.utils.functional", "Promise")?;
+        match value.is_instance(promise)? {
+            true => value.str()?.into_any(),
+            false => value,
+        }
+    };
+
+    if value.hasattr(intern!(py, "__html__"))? {
+        return Ok(PythonConditionalEscape::Html(
+            value.call_method0(intern!(py, "__html__"))?,
+        ));
+    }
+
+    let value = value.str()?.extract::<String>()?;
+    let mut escaped = String::new();
+    encode_quoted_attribute_to_string(&value, &mut escaped);
+    Ok(PythonConditionalEscape::Text(escaped))
+}
+
 /// Hex encode characters for use in JavaScript strings.
 fn escapejs(value: &str) -> String {
     let mut result = String::with_capacity(value.len());
@@ -505,6 +576,90 @@ impl ResolveFilter for ForceEscapeFilter {
             other => other,
         };
         EscapeFilter.resolve(variable, py, template, context)
+    }
+}
+
+impl ResolveFilter for JoinFilter {
+    fn resolve<'t, 'py>(
+        &self,
+        variable: Option<Content<'t, 'py>>,
+        py: Python<'py>,
+        template: TemplateString<'t>,
+        context: &mut Context,
+    ) -> ResolveResult<'t, 'py> {
+        let argument = self
+            .argument
+            .resolve(py, template, context, ResolveFailures::Raise)?
+            .expect("missing argument in context should already have raised");
+        let Some(variable) = variable else {
+            return Ok(Some("".as_content()));
+        };
+
+        let data = if context.autoescape {
+            let result = (|| -> Result<JoinData<'py>, PyRenderError> {
+                let separator = conditional_escape(argument, py)?;
+                let iterable = variable.to_py(py);
+
+                match separator {
+                    ConditionalEscape::Text(separator) => {
+                        let values = iterable
+                            .try_iter()?
+                            .map(|value| conditional_escape(Content::Py(value?), py))
+                            .collect::<Result<Vec<_>, _>>()?;
+
+                        let mut data = String::new();
+                        for (index, value) in values.into_iter().enumerate() {
+                            if index > 0 {
+                                data.push_str(&separator);
+                            }
+                            let value = match value {
+                                ConditionalEscape::Text(value) => value,
+                                ConditionalEscape::Html(value) => value.extract::<String>()?.into(),
+                            };
+                            data.push_str(&value);
+                        }
+                        Ok(JoinData::Text(data))
+                    }
+                    ConditionalEscape::Html(separator) => {
+                        let join = separator.getattr(intern!(py, "join"))?;
+                        let values = PyList::empty(py);
+                        for value in iterable.try_iter()? {
+                            match conditional_escape(Content::Py(value?), py)? {
+                                ConditionalEscape::Text(value) => values.append(value.as_ref())?,
+                                ConditionalEscape::Html(value) => values.append(value)?,
+                            }
+                        }
+                        Ok(JoinData::Python(join.call1((values,))?))
+                    }
+                }
+            })();
+            match result {
+                Ok(data) => data,
+                Err(PyRenderError::PyErr(error))
+                    if error.is_instance_of::<pyo3::exceptions::PyTypeError>(py) =>
+                {
+                    return Ok(Some(variable));
+                }
+                Err(error) => return Err(error),
+            }
+        } else {
+            let data = match argument
+                .to_py(py)
+                .call_method1("join", (variable.to_py(py),))
+            {
+                Ok(data) => data,
+                Err(error) if error.is_instance_of::<pyo3::exceptions::PyTypeError>(py) => {
+                    return Ok(Some(variable));
+                }
+                Err(error) => return Err(error.into()),
+            };
+            JoinData::Python(data)
+        };
+
+        Ok(Some(match data {
+            JoinData::Text(data) => Content::String(ContentString::HtmlSafe(Cow::Owned(data))),
+            JoinData::Python(data) => safe_content(data)?,
+        }))
     }
 }
 
